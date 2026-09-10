@@ -1,0 +1,20 @@
+{
+  "schemaVersion": 1,
+  "id": "atb.heyomarchylite",
+  "name": "Hey Omarchy-Lite",
+  "version": "1.0.0",
+  "author": "atb",
+  "description": "Local, free, open-source voice assistant. Click to start listening, click again to stop. Fastpath actions run instantly, novel desktop-control requests route through omarchy-voice's full agent, plain questions get a fast direct answer.",
+  "kinds": [
+    "bar-widget"
+  ],
+  "entryPoints": {
+    "barWidget": "HeyOmarchyLiteIndicator.qml"
+  },
+  "barWidget": {
+    "displayName": "Hey Omarchy-Lite",
+    "description": "Listening state for Hey Omarchy-Lite",
+    "category": "Audio",
+    "allowMultiple": false
+  }
+}

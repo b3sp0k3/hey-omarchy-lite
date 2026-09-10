@@ -1,0 +1,338 @@
+#!/bin/bash
+# hey-omarchy-lite — local, free, open-source voice assistant for Hyprland.
+# Press CONTROL+SPACE (bound via ~/.config/hypr/bindings.lua) to start
+# listening, press again to stop, transcribe, and hear the answer.
+# pw-record -> voxtype/whisper.cpp (STT) -> one of three routes:
+#   1. known desktop action (regex fastpath, no LLM)       -> instant (~0.3s)
+#   2. novel/complex desktop action (full omarchy-voice agent) -> slow (~2min
+#      on this CPU, sends its whole tool manifest) but can do anything
+#   3. plain question (minimal-prompt ollama qwen2.5:3b chat)  -> fast (~2-8s)
+# -> piper (TTS)
+# One hotkey for the whole OS: a cheap local classification call decides
+# route 2 vs 3 for anything the fastpath doesn't already cover, so plain
+# questions stay fast and real desktop-control requests still get done
+# instead of just talked about.
+set -uo pipefail
+
+RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/hey-omarchy-lite"
+PID_FILE="$RUNTIME_DIR/record.pid"
+WAV_FILE="$RUNTIME_DIR/record.wav"
+STATE_FILE="$RUNTIME_DIR/state.json"
+LOG_FILE="$HOME/.local/state/hey-omarchy-lite/invoke.log"
+mkdir -p "$HOME/.local/state/hey-omarchy-lite" 2>/dev/null || true
+{
+  echo "$(date '+%H:%M:%S.%3N') argv=[$*] RUNTIME_DIR=$RUNTIME_DIR XDG_RUNTIME_DIR=${XDG_RUNTIME_DIR:-unset} PID_FILE_exists=$([ -f "$PID_FILE" ] && echo yes || echo no) PID_FILE_content=$(cat "$PID_FILE" 2>/dev/null || echo '')"
+} >> "$LOG_FILE" 2>&1 || true
+MAX_SECONDS=20
+OLLAMA_MODEL="qwen2.5:3b"
+OLLAMA_URL="http://localhost:11434/api/chat"
+VOXTYPE_MODEL_DIR="$HOME/.local/share/voxtype/models"
+SYSTEM_PROMPT="You are a helpful, concise voice assistant. Answer the user's question directly in 1-3 short sentences suitable for being read aloud. No markdown, no lists."
+OMARCHY_VOICE_SRC="$HOME/.local/share/omarchy-voice/src"
+# Few-shot matters here: a bare one-line instruction with no examples got
+# "what is the tallest mountain in the world" classified ACTION on this 3B
+# model (confirmed deterministic at temperature 0, not a fluke) -- these
+# examples fixed it (9/9 correct in testing) where the plain instruction
+# alone got it wrong.
+INTENT_SYSTEM_PROMPT='Classify the user message as exactly one word: ACTION or QUESTION.
+ACTION = they want something done or changed on their Linux desktop (open/close/move/resize apps or windows, change settings, volume, brightness, workspaces), OR they want live system info only the OS can provide (current time, battery, disk space, running processes).
+QUESTION = general knowledge, explanations, or conversation that does not require touching or querying this computer.
+
+Examples:
+"what is the tallest mountain in the world" -> QUESTION
+"explain how git rebase works" -> QUESTION
+"why is the sky blue" -> QUESTION
+"open the terminal" -> ACTION
+"put this window on the left" -> ACTION
+"what time is it" -> ACTION
+"how much disk space do I have left" -> ACTION
+"whats the capital of japan" -> QUESTION
+
+Reply with exactly one word: ACTION or QUESTION. Nothing else.'
+
+ensure_runtime_dir() {
+  mkdir -p -m 0700 "$RUNTIME_DIR" 2>/dev/null || { mkdir -p "$RUNTIME_DIR"; chmod 0700 "$RUNTIME_DIR"; }
+}
+
+# Written on every state transition so the "Hey Omarchy-Lite" bar widget can
+# reflect live status without polling a process -- same pattern as
+# omarchy-voice's own state.json/VoiceIndicator.qml.
+write_state() {
+  ensure_runtime_dir
+  local status="$1" text="${2:-}"
+  text=$(echo "$text" | sed 's/"/\\"/g' | tr -d '\n' | cut -c1-200)
+  local tmp="$STATE_FILE.tmp"
+  printf '{"status":"%s","text":"%s","updated":%s}\n' "$status" "$text" "$(date +%s)" > "$tmp" 2>/dev/null \
+    && mv "$tmp" "$STATE_FILE" 2>/dev/null || true
+}
+
+# On-screen banner via Hyprland's own compositor overlay -- no notification
+# daemon is running on this machine (no mako/dunst/swaync), so notify-send
+# silently goes nowhere. hyprctl notify renders directly, no daemon needed.
+banner() {
+  local color="$1" duration_ms="$2" text="$3"
+  hyprctl dismissnotify >/dev/null 2>&1 || true
+  hyprctl notify -1 "$duration_ms" "$color" "$text" >/dev/null 2>&1 || true
+}
+
+speak() {
+  local text="$1"
+  text=$(echo "$text" | cut -c1-500)
+  [ -z "$text" ] && return 0
+  if [ -f "$HOME/.local/share/piper/en_US-ryan-high.onnx" ] && command -v piper-tts >/dev/null 2>&1; then
+    echo "$text" | piper-tts --model "$HOME/.local/share/piper/en_US-ryan-high.onnx" --output-raw 2>/dev/null \
+      | aplay -r 22050 -f S16_LE -t raw - 2>/dev/null &
+  else
+    espeak-ng -v en-us -s 150 -- "$text" 2>/dev/null &
+  fi
+}
+
+recording_pid() {
+  [ -f "$PID_FILE" ] || return 1
+  local pid; pid=$(cat "$PID_FILE" 2>/dev/null || echo "")
+  [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null && echo "$pid" && return 0
+  rm -f "$PID_FILE" 2>/dev/null
+  return 1
+}
+
+do_start() {
+  ensure_runtime_dir
+  recording_pid >/dev/null 2>&1 && return 0
+  if ! command -v pw-record >/dev/null 2>&1; then
+    banner "rgb(ff5555)" 4000 "Missing pw-record — install pipewire-audio"
+    return 1
+  fi
+  rm -f "$WAV_FILE" 2>/dev/null
+  umask 077
+  write_state "listening" ""
+  banner "rgb(1e90ff)" $(( MAX_SECONDS * 1000 )) "🎤 Listening... (Ctrl+Space to stop)"
+  timeout -s INT "$MAX_SECONDS" pw-record --rate 16000 --channels 1 --format s16 "$WAV_FILE" >/dev/null 2>&1 &
+  echo $! > "$PID_FILE"
+}
+
+do_stop() {
+  ensure_runtime_dir
+  local pid; pid=$(recording_pid 2>/dev/null || echo "")
+  if [ -n "$pid" ]; then
+    kill -s INT "$pid" 2>/dev/null || true
+    local deadline=$(( $(date +%s) + 3 ))
+    while kill -0 "$pid" 2>/dev/null && [ "$(date +%s)" -lt "$deadline" ]; do sleep 0.05; done
+    kill -9 "$pid" 2>/dev/null || true
+  fi
+  rm -f "$PID_FILE" 2>/dev/null
+  write_state "thinking" ""
+
+  if [ ! -s "$WAV_FILE" ] || [ "$(stat -c%s "$WAV_FILE" 2>/dev/null || echo 0)" -lt 5000 ]; then
+    banner "rgb(ffaa00)" 3000 "Heard nothing — audio too short, try again"
+    rm -f "$WAV_FILE" 2>/dev/null
+    write_state "idle" ""
+    return 0
+  fi
+
+  local text=""
+  if command -v voxtype >/dev/null 2>&1; then
+    local model="base.en"
+    [ -f "$VOXTYPE_MODEL_DIR/ggml-base.en.bin" ] || model="small.en"
+    local raw; raw=$(voxtype -q --model "$model" transcribe "$WAV_FILE" 2>&1 || true)
+    text=$(echo "$raw" | sed -r 's/\x1B\[[0-9;]*[A-Za-z]//g' | python3 -c "
+import sys
+NOISE = ('Loading audio file:', 'Audio format:', 'Processing', 'whisper_', 'ggml_', 'main:', 'system_info', 'Error:')
+lines = [l.strip() for l in sys.stdin.read().splitlines()]
+kept = [l for l in lines if l and not any(l.startswith(n) for n in NOISE)]
+print(kept[-1] if kept else '')
+" 2>/dev/null || echo "")
+  fi
+  if [ -z "$text" ] && command -v whisper-cli >/dev/null 2>&1; then
+    local model="$VOXTYPE_MODEL_DIR/ggml-base.en.bin"
+    [ -f "$model" ] || model="$VOXTYPE_MODEL_DIR/ggml-small.en.bin"
+    text=$(whisper-cli -m "$model" -f "$WAV_FILE" --no-prints -nt -l en 2>/dev/null | xargs 2>/dev/null || echo "")
+  fi
+  rm -f "$WAV_FILE" 2>/dev/null
+
+  text=$(echo "$text" | xargs 2>/dev/null || echo "")
+  if [ -z "$text" ]; then
+    banner "rgb(ffaa00)" 3000 "Heard nothing — try again"
+    write_state "idle" ""
+    return 0
+  fi
+  # Strip trailing punctuation STT adds ("close browser." breaks window
+  # matching against a literal window title/class with no period in it).
+  text=$(echo "$text" | sed -E 's/[.!?]+$//' | xargs 2>/dev/null || echo "$text")
+
+  echo "$(date '+%H:%M:%S.%3N') heard: [$text]" >> "$LOG_FILE" 2>&1 || true
+  write_state "acting" "$text"
+  banner "rgb(ffaa00)" 15000 "🤔 \"$text\""
+
+  # "close X" is unreliable in omarchy-voice: it does a literal,
+  # whitespace-sensitive substring match against the window's class/title.
+  # Two distinct failure modes seen in testing:
+  #   - semantic gap: "browser" never appears in a real browser's window
+  #     class (google-chrome, firefox, ...) -- "open browser" has a
+  #     hardcoded alias for this, "close browser" doesn't.
+  #   - literal gap: window class "chatgpt" (no space) vs. heard phrase
+  #     "chat GPT" (space) -- an exact match, semantically, that the
+  #     whitespace-sensitive substring check still rejects.
+  # Resolve against the real, currently-open windows ourselves before
+  # handing off, covering both: known generic terms via an alias table,
+  # anything else via whitespace/case-insensitive fuzzy matching.
+  if echo "$text" | grep -qiE '\bclos[a-z]*\b'; then
+    local real_class
+    real_class=$(hyprctl clients -j 2>/dev/null | python3 -c "
+import json, re, sys
+
+try:
+    clients = json.load(sys.stdin)
+except Exception:
+    clients = []
+
+text = sys.argv[1].lower()
+# pull out whatever follows the close-word, dropping filler like 'the'/'window'/'tab'/'app'
+m = re.search(r'clos[a-z]*\s+(the\s+)?(?P<q>.+?)\s*(window|tab|app)?$', text)
+query = (m.group('q') if m else text).strip()
+if not query:
+    sys.exit(0)
+
+ALIASES = {
+    'browser': ('chrome', 'chromium', 'brave', 'firefox', 'safari', 'edge', 'vivaldi', 'opera'),
+    'terminal': ('ghostty', 'alacritty', 'kitty', 'foot', 'wezterm'),
+    'file manager': ('nautilus', 'files', 'thunar', 'nemo'),
+    'files': ('nautilus', 'files', 'thunar', 'nemo'),
+}
+
+def haystack(c):
+    return ' '.join(str(c.get(k) or '') for k in ('class', 'initialClass', 'title', 'initialTitle')).lower()
+
+# 1) known generic term -> known real class substrings
+for alias, needles in ALIASES.items():
+    if alias in query:
+        for c in clients:
+            h = haystack(c)
+            if any(n in h for n in needles):
+                print(c.get('class'))
+                sys.exit(0)
+
+# 2) literal query, but whitespace/case-insensitive against class/title
+q_norm = re.sub(r'\s+', '', query)
+for c in clients:
+    h_norm = re.sub(r'\s+', '', haystack(c))
+    if q_norm and q_norm in h_norm:
+        print(c.get('class'))
+        sys.exit(0)
+" "$text" 2>/dev/null || echo "")
+    [ -n "$real_class" ] && text="close $real_class"
+  fi
+
+  # Desktop-action check: reuse omarchy-voice's instant regex fastpath (no
+  # LLM, <10ms) to see if this is a known action (open/close app, workspace,
+  # window, mouse, shortcut, volume, screenshot...). If it matches, delegate
+  # execution to omarchy-voice itself, which hits the same fastpath and runs
+  # it instantly -- no need to reimplement any of the actual tool execution.
+  # If it doesn't match, this isn't an action omarchy-voice can fast-path
+  # either, and would fall through to its ~2min full-manifest LLM path, so
+  # we skip straight to hey-omarchy-lite's own fast conversational answer instead.
+  if command -v omarchy-voice >/dev/null 2>&1 && [ -d "$OMARCHY_VOICE_SRC" ]; then
+    local is_action
+    is_action=$(python3 -c "
+import sys
+sys.path.insert(0, '$OMARCHY_VOICE_SRC')
+from omarchy_voice.fastpath import match
+print('yes' if match(sys.argv[1]) else 'no')
+" "$text" 2>/dev/null || echo "no")
+    if [ "$is_action" = "yes" ]; then
+      local out reply
+      out=$(omarchy-voice say "$text" 2>&1)
+      reply=$(echo "$out" | grep "^reply" | head -n1 | sed 's/^reply *//' | sed -r 's/\x1B\[[0-9;]*m//g' | sed 's/ (.*$//' | xargs 2>/dev/null || echo "")
+      [ -z "$reply" ] && reply="Done."
+      echo "$(date '+%H:%M:%S.%3N') action: reply=[$reply] raw=[$(echo "$out" | tr '\n' '|')]" >> "$LOG_FILE" 2>&1 || true
+      write_state "idle" "$reply"
+      banner "rgb(50c878)" 15000 "⚡ $reply"
+      speak "$reply"
+      return 0
+    fi
+
+    # Not a fastpath action -- but that only covers ~20 common phrasings.
+    # This tool needs to be able to control the whole OS, not just those, so
+    # anything more novel/multi-step ("open my email and put it beside the
+    # browser") still needs to go through omarchy-voice's real agent, which
+    # can reason with the full tool set. That path is slow (~2min on this
+    # CPU, since it always sends the full capability manifest), so it's only
+    # worth paying for when this really is an action -- a cheap local
+    # classification call (~1-2s, tiny prompt) decides that first, keeping
+    # plain questions on the fast path below.
+    local intent
+    intent=$(python3 -c "
+import json, sys
+print(json.dumps({
+    'model': sys.argv[1],
+    'messages': [
+        {'role': 'system', 'content': sys.argv[2]},
+        {'role': 'user', 'content': sys.argv[3]},
+    ],
+    'stream': False,
+    'options': {'num_predict': 10, 'temperature': 0},
+}))
+" "$OLLAMA_MODEL" "$INTENT_SYSTEM_PROMPT" "$text" \
+      | curl -s -m 20 -X POST "$OLLAMA_URL" -H "Content-Type: application/json" -d @- \
+      | python3 -c "import json,sys; print(json.load(sys.stdin).get('message',{}).get('content','').strip().upper())" 2>/dev/null || echo "QUESTION")
+    intent=$(echo "$intent" | tr -cd 'A-Z')
+    echo "$(date '+%H:%M:%S.%3N') intent=[$intent]" >> "$LOG_FILE" 2>&1 || true
+
+    if [ "$intent" = "ACTION" ]; then
+      local out reply
+      banner "rgb(1e90ff)" 150000 "🔧 Working on it (complex action, may take a minute or two)..."
+      out=$(timeout 170 omarchy-voice say "$text" 2>&1)
+      reply=$(echo "$out" | grep "^reply" | head -n1 | sed 's/^reply *//' | sed -r 's/\x1B\[[0-9;]*m//g' | sed 's/ (.*$//' | xargs 2>/dev/null || echo "")
+      [ -z "$reply" ] && reply="Done, though I'm not fully sure it worked."
+      echo "$(date '+%H:%M:%S.%3N') full-agent: reply=[$reply] raw=[$(echo "$out" | tr '\n' '|')]" >> "$LOG_FILE" 2>&1 || true
+      write_state "idle" "$reply"
+      banner "rgb(50c878)" 15000 "⚡ $reply"
+      speak "$reply"
+      return 0
+    fi
+  fi
+
+  local payload reply
+  payload=$(python3 -c "
+import json, sys
+print(json.dumps({
+    'model': sys.argv[1],
+    'messages': [
+        {'role': 'system', 'content': sys.argv[2]},
+        {'role': 'user', 'content': sys.argv[3]},
+    ],
+    'stream': False,
+    'options': {'num_predict': 150},
+}))
+" "$OLLAMA_MODEL" "$SYSTEM_PROMPT" "$text")
+
+  reply=$(curl -s -m 60 -X POST "$OLLAMA_URL" -H "Content-Type: application/json" -d "$payload" \
+    | python3 -c "import json,sys; print(json.load(sys.stdin).get('message',{}).get('content','').strip())" 2>/dev/null || echo "")
+
+  if [ -z "$reply" ]; then
+    write_state "error" "no response from ollama"
+    banner "rgb(ff5555)" 5000 "Error: no response from ollama"
+    speak "Sorry, I didn't get a response."
+    return 0
+  fi
+
+  write_state "idle" "$reply"
+  banner "rgb(50c878)" 15000 "💬 $reply"
+  speak "$reply"
+}
+
+do_toggle() {
+  local pid; pid=$(recording_pid 2>/dev/null || echo "")
+  echo "$(date '+%H:%M:%S.%3N') do_toggle: recording_pid=[$pid] -> $([ -n "$pid" ] && echo stop || echo start)" >> "$LOG_FILE" 2>&1 || true
+  if [ -n "$pid" ]; then
+    do_stop
+  else
+    do_start
+  fi
+}
+
+case "${1:-}" in
+  start) do_start ;;
+  stop) do_stop ;;
+  toggle) do_toggle ;;
+  *) echo "usage: $0 {start|stop|toggle}" >&2; exit 1 ;;
+esac
