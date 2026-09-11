@@ -4,7 +4,7 @@
   "name": "Hey Omarchy-Lite",
   "version": "1.0.0",
   "author": "atb",
-  "description": "Local, free, open-source voice assistant. Click to start listening, click again to stop. Fastpath actions run instantly, novel desktop-control requests route through omarchy-voice's full agent, plain questions get a fast direct answer.",
+  "description": "Local, free voice assistant for Omarchy — instant desktop control, fast answers, no cloud.",
   "kinds": [
     "bar-widget"
   ],

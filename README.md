@@ -1,9 +1,6 @@
 # Hey Omarchy-Lite
 
-A local, free, open-source voice assistant for [Omarchy](https://omarchy.org)
-(Hyprland). Press `CONTROL + SPACE`, ask or say anything, press it again to
-hear the answer or see the action done. No cloud APIs, no API keys, nothing
-leaves your machine.
+Hey Omarchy-Lite is a local, free, and fully open-source voice assistant for [Omarchy](https://omarchy.org) (Hyprland). One hotkey (`CONTROL + SPACE`) handles everything — simple desktop actions run instantly, complex ones fall back to `omarchy-voice`'s full agent, and plain questions get a fast local answer. No cloud APIs, no API keys, nothing leaves your machine.
 
 ```
 you   "close the browser"
