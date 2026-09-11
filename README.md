@@ -77,7 +77,7 @@ questions fast without giving up the ability to actually do things.
 ## Install
 
 ```bash
-git clone https://github.com/atb/hey-omarchy-lite
+git clone https://github.com/b3sp0k3/hey-omarchy-lite
 cd hey-omarchy-lite
 ./install.sh
 ```

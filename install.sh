@@ -122,7 +122,7 @@ else
     echo ""
     echo "$MARK_START"
     echo "-- Hey Omarchy-Lite: local, free voice assistant. Press CONTROL+SPACE to"
-    echo "-- toggle listening. https://github.com/atb/hey-omarchy-lite"
+    echo "-- toggle listening. https://github.com/b3sp0k3/hey-omarchy-lite"
     echo 'if o.cmd_present("hey-omarchy-lite") then'
     echo '  o.bind("CONTROL + SPACE", "Hey Omarchy-Lite voice assistant (toggle)", "hey-omarchy-lite toggle")'
     echo "end"
