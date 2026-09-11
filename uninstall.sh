@@ -3,7 +3,9 @@
 set -uo pipefail
 
 BIN_DEST="$HOME/.local/bin/hey-omarchy-lite"
-PLUGIN_DEST="$HOME/.config/omarchy/plugins/atb.heyomarchylite"
+PLUGIN_ID="io.github.b3sp0k3.hey-omarchy-lite"
+PLUGIN_DEST="$HOME/.config/omarchy/plugins/$PLUGIN_ID"
+LEGACY_PLUGIN_DEST="$HOME/.config/omarchy/plugins/atb.heyomarchylite"
 BINDINGS="$HOME/.config/hypr/bindings.lua"
 SHELL_JSON="$HOME/.config/omarchy/shell.json"
 MARK_START="-- >>> hey-omarchy-lite (managed) >>>"
@@ -20,27 +22,35 @@ if [ -f "$BINDINGS" ] && grep -qF -- "$MARK_START" "$BINDINGS"; then
   ok "removed keybinding from $BINDINGS"
 fi
 
-if [ -f "$SHELL_JSON" ] && grep -q 'atb.heyomarchylite' "$SHELL_JSON"; then
+if [ -f "$SHELL_JSON" ] && grep -qE 'atb\.heyomarchylite|io\.github\.b3sp0k3\.hey-omarchy-lite' "$SHELL_JSON"; then
   cp "$SHELL_JSON" "$SHELL_JSON.bak-hey-omarchy-lite-uninstall"
   python3 - "$SHELL_JSON" <<'PYEOF'
 import json, sys
 path = sys.argv[1]
-data = json.load(open(path))
-removed = 0
-for section in data.get("bar", {}).get("layout", {}).values():
-    if isinstance(section, list):
-        before = len(section)
-        section[:] = [w for w in section
-                      if not (isinstance(w, dict) and w.get("id") == "atb.heyomarchylite")]
-        removed += before - len(section)
-if removed:
-    json.dump(data, open(path, "w"), indent=2)
-    print(f"   took the widget off the bar ({removed} entry)")
+try:
+    data = json.load(open(path))
+    removed = 0
+    ids_to_remove = {"atb.heyomarchylite", "io.github.b3sp0k3.hey-omarchy-lite"}
+    for section in data.get("bar", {}).get("layout", {}).values():
+        if isinstance(section, list):
+            before = len(section)
+            section[:] = [w for w in section
+                          if not (isinstance(w, dict) and w.get("id") in ids_to_remove)]
+            removed += before - len(section)
+    if removed:
+        json.dump(data, open(path, "w"), indent=2)
+        print(f"   took the widget off the bar ({removed} entry)")
+except Exception as e:
+    print(f"   warn: could not clean shell.json: {e}", file=sys.stderr)
 PYEOF
 fi
 
-rm -rf "$PLUGIN_DEST"
-ok "removed $PLUGIN_DEST"
+for dest in "$PLUGIN_DEST" "$LEGACY_PLUGIN_DEST"; do
+  if [ -d "$dest" ]; then
+    rm -rf "$dest"
+    ok "removed $dest"
+  fi
+done
 
 rm -f "$BIN_DEST"
 ok "removed $BIN_DEST"
@@ -48,6 +58,12 @@ ok "removed $BIN_DEST"
 rm -rf "${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/hey-omarchy-lite"
 rm -rf "$HOME/.local/state/hey-omarchy-lite"
 ok "removed runtime/state directories"
+
+# Also try marketplace uninstall path if installed via omarchy plugin add
+if command -v omarchy >/dev/null 2>&1; then
+  omarchy plugin remove "$PLUGIN_ID" 2>/dev/null || true
+  omarchy plugin remove "atb.heyomarchylite" 2>/dev/null || true
+fi
 
 hyprctl reload >/dev/null 2>&1 || true
 ok "reloaded Hyprland"

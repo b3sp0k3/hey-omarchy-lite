@@ -8,7 +8,7 @@ import qs.Ui
 // omarchy-voice's VoiceIndicator.qml.
 BarWidget {
   id: root
-  moduleName: "atb.heyomarchylite"
+  moduleName: "io.github.b3sp0k3.hey-omarchy-lite"
 
   property string status: "idle"
   property string label: ""

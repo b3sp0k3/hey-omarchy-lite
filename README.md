@@ -76,23 +76,38 @@ questions fast without giving up the ability to actually do things.
 
 ## Install
 
+**Full install (recommended — bar widget + voice binary + keybinding):**
 ```bash
 git clone https://github.com/b3sp0k3/hey-omarchy-lite
 cd hey-omarchy-lite
 ./install.sh
 ```
-
 Safe to re-run. It backs up `~/.config/hypr/bindings.lua` before touching
 it, and only ever adds/updates its own clearly-marked block there.
+Migrates automatically from the legacy `atb.heyomarchylite` ID if present.
+
+**Marketplace (bar widget only):**
+```bash
+omarchy plugin add https://github.com/b3sp0k3/hey-omarchy-lite.git --enable
+```
+This installs the widget via the Omarchy marketplace. For voice to work you
+still need the binary — run `./install.sh` once, or `bin/hey-omarchy-lite`
+directly.
+
+**Validate before publishing:**
+```bash
+omarchy plugin validate .
+```
 
 ## Uninstall
 
 ```bash
 ./uninstall.sh
+# or: omarchy plugin remove io.github.b3sp0k3.hey-omarchy-lite
 ```
 
 Reverses everything install.sh did: removes the keybinding, the bar
-widget, the binary, and its runtime/state directories.
+widget (both `io.github.b3sp0k3.hey-omarchy-lite` and legacy `atb.heyomarchylite`), and its runtime/state directories.
 
 ## Use
 

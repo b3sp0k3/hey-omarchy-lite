@@ -1,9 +1,10 @@
 {
   "schemaVersion": 1,
-  "id": "atb.heyomarchylite",
+  "id": "io.github.b3sp0k3.hey-omarchy-lite",
   "name": "Hey Omarchy-Lite",
   "version": "1.0.0",
-  "author": "atb",
+  "author": "b3sp0k3",
+  "license": "MIT",
   "description": "Local, free voice assistant for Omarchy — instant desktop control, fast answers, no cloud.",
   "kinds": [
     "bar-widget"

@@ -1,0 +1,21 @@
+{
+  "schemaVersion": 1,
+  "id": "io.github.b3sp0k3.hey-omarchy-lite",
+  "name": "Hey Omarchy-Lite",
+  "version": "1.0.0",
+  "author": "b3sp0k3",
+  "license": "MIT",
+  "description": "Local, free voice assistant for Omarchy — instant desktop control, fast answers, no cloud.",
+  "kinds": [
+    "bar-widget"
+  ],
+  "entryPoints": {
+    "barWidget": "HeyOmarchyLiteIndicator.qml"
+  },
+  "barWidget": {
+    "displayName": "Hey Omarchy-Lite",
+    "description": "Listening state for Hey Omarchy-Lite",
+    "category": "Audio",
+    "allowMultiple": false
+  }
+}
